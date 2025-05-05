@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from math import sqrt
+from typing import List, Union
 
 
 def call_reinit(m, i, o):
@@ -37,7 +38,7 @@ class CBPLinear(nn.Module):
     def __init__(
             self,
             in_layer: nn.Linear,
-            out_layer: nn.Linear,
+            out_layer: Union[nn.Linear, List[nn.Linear]],
             ln_layer: nn.LayerNorm = None,
             bn_layer: nn.BatchNorm1d = None,
             replacement_rate=1e-4,
@@ -50,8 +51,9 @@ class CBPLinear(nn.Module):
         super().__init__()
         if type(in_layer) is not nn.Linear:
             raise Warning("Make sure in_layer is a weight layer")
-        if type(out_layer) is not nn.Linear:
-            raise Warning("Make sure out_layer is a weight layer")
+        if not (isinstance(out_layer, nn.Linear) or
+                (isinstance(out_layer, (list, nn.ModuleList)) and all(isinstance(layer, nn.Linear) for layer in out_layer))):
+            raise Warning("Make sure out_layer is a Linear layer or a list/ModuleList of Linear layers")
         """
         Define the hyper-parameters of the algorithm
         """
@@ -106,7 +108,11 @@ class CBPLinear(nn.Module):
         """
         Calculate feature utility
         """
-        output_weight_mag = self.out_layer.weight.data.abs().mean(dim=0)
+        if isinstance(self.out_layer, nn.Linear):
+            output_weight_mag = self.out_layer.weight.data.abs().mean(dim=0)
+        elif isinstance(self.out_layer, (list, nn.ModuleList)):
+            weight_mags = [layer.weight.data.abs().mean(dim=0) for layer in self.out_layer]
+            output_weight_mag = torch.stack(weight_mags).mean(dim=0)
         self.util.data = output_weight_mag * self.features.abs().mean(dim=[i for i in range(self.features.ndim - 1)])
         """
         Find features with smallest utility
@@ -128,7 +134,11 @@ class CBPLinear(nn.Module):
                 torch.empty(num_features_to_replace, self.in_layer.in_features, device=self.util.device).uniform_(-self.bound, self.bound)
             self.in_layer.bias.data[features_to_replace] *= 0
 
-            self.out_layer.weight.data[:, features_to_replace] = 0
+            if isinstance(self.out_layer, nn.Linear):
+                self.out_layer.weight.data[:, features_to_replace] = 0
+            elif isinstance(self.out_layer, (list, nn.ModuleList)):
+                for layer in self.out_layer:
+                    layer.weight.data[:, features_to_replace] = 0
             self.ages[features_to_replace] = 0
 
             """
