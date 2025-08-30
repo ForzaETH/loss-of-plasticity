@@ -7,8 +7,8 @@ from lop.algos.cbp_linear import call_reinit, log_features, get_layer_bound
 class CBPConv(nn.Module):
     def __init__(
             self,
-            in_layer: nn.Conv2d,
-            out_layer: [nn.Conv2d, nn.Linear],
+            in_layer: [nn.Conv1d, nn.Conv2d],
+            out_layer: [nn.Conv1d, nn.Conv2d, nn.Linear],
             ln_layer: nn.LayerNorm = None,
             bn_layer: nn.BatchNorm2d = None,
             num_last_filter_outputs=1,
@@ -20,9 +20,9 @@ class CBPConv(nn.Module):
             decay_rate=0,
     ):
         super().__init__()
-        if type(in_layer) is not nn.Conv2d:
+        if type(in_layer) not in [nn.Conv1d, nn.Conv2d]:
             raise Warning("Make sure in_layer is a convolutional layer")
-        if type(out_layer) not in [nn.Linear, nn.Conv2d]:
+        if type(out_layer) not in [nn.Linear, nn.Conv1d, nn.Conv2d]:
             raise Warning("Make sure out_layer is a convolutional or linear layer")
 
         """
@@ -49,9 +49,13 @@ class CBPConv(nn.Module):
         """
         Utility of all features/neurons
         """
-        self.util = nn.Parameter(torch.zeros(self.in_layer.out_channels), requires_grad=False)
-        self.ages = nn.Parameter(torch.zeros(self.in_layer.out_channels), requires_grad=False)
-        self.accumulated_num_features_to_replace = nn.Parameter(torch.zeros(1), requires_grad=False)
+        # self.util = nn.Parameter(torch.zeros(self.in_layer.out_channels), requires_grad=False)
+        # self.ages = nn.Parameter(torch.zeros(self.in_layer.out_channels), requires_grad=False)
+        # self.accumulated_num_features_to_replace = nn.Parameter(torch.zeros(1), requires_grad=False)
+        param_shape = self.out_layer.in_features if isinstance(self.out_layer, torch.nn.Linear) else self.in_layer.out_channels
+        self.register_buffer("util", torch.zeros(param_shape))
+        self.register_buffer("ages", torch.zeros(self.in_layer.out_channels))
+        self.register_buffer("accumulated_num_features_to_replace", torch.zeros(1))
         """
         Calculate uniform distribution's bound for random feature initialization
         """
@@ -82,12 +86,17 @@ class CBPConv(nn.Module):
         """
         Calculate feature utility
         """
+        # print(f"self.out_layer: {self.out_layer}, self.in_layer: {self.in_layer}")
         if isinstance(self.out_layer, torch.nn.Linear):
             output_weight_mag = self.out_layer.weight.data.abs().mean(dim=0).view(-1, self.num_last_filter_outputs)
             self.util.data = (output_weight_mag * self.features.abs().mean(dim=0).view(-1, self.num_last_filter_outputs)).mean(dim=1)
+        elif isinstance(self.out_layer, torch.nn.Conv1d):
+            output_weight_mag = self.out_layer.weight.data.abs().mean(dim=(0, 2)) # TODO: adapt dim
+            self.util.data = output_weight_mag * self.features.abs().mean(dim=(0, 2)) # TODO: adapt dim
         elif isinstance(self.out_layer, torch.nn.Conv2d):
             output_weight_mag = self.out_layer.weight.data.abs().mean(dim=(0, 2, 3))
             self.util.data = output_weight_mag * self.features.abs().mean(dim=(0, 2, 3))
+
         """
         Find features with smallest utility
         """
@@ -95,10 +104,10 @@ class CBPConv(nn.Module):
         new_features_to_replace = eligible_feature_indices[new_features_to_replace]
         features_to_replace_input_indices, features_to_replace_output_indices = new_features_to_replace, new_features_to_replace
 
-        if isinstance(self.in_layer, torch.nn.Conv2d) and isinstance(self.out_layer, torch.nn.Linear):
+        if (isinstance(self.in_layer, torch.nn.Conv2d) or isinstance(self.in_layer, torch.nn.Conv1d)) and isinstance(self.out_layer, torch.nn.Linear):
             features_to_replace_output_indices = (
                     (new_features_to_replace * self.num_last_filter_outputs).repeat_interleave(self.num_last_filter_outputs) +
-                    torch.tensor([i for i in range(self.num_last_filter_outputs)]).repeat(new_features_to_replace.size()[0]))
+                    torch.tensor([i for i in range(self.num_last_filter_outputs)], device=new_features_to_replace.device).repeat(new_features_to_replace.size()[0]))
         return features_to_replace_input_indices, features_to_replace_output_indices
 
     def reinit_features(self, features_to_replace_input_indices, features_to_replace_output_indices):
